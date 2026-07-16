@@ -238,6 +238,25 @@ def _build_mcp_env(
     return env
 
 
+def _cleanup_chrome_locks(user_data_dir_str: str | None) -> None:
+    """Remove stale Chrome Singleton locks to prevent launch failures after unclean shutdown."""
+    if not user_data_dir_str:
+        return
+    user_data_dir = Path(user_data_dir_str)
+    if not user_data_dir.is_dir():
+        return
+
+    lock_files = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
+    for lock_name in lock_files:
+        p = user_data_dir / lock_name
+        if p.exists() or p.is_symlink():
+            try:
+                p.unlink(missing_ok=True)
+                log.info("Removed stale Chrome lock: %s", p)
+            except Exception as e:
+                log.warning("Failed to remove stale Chrome lock %s: %s", p, e)
+
+
 def main() -> None:
     width = _int_env("DISPLAY_WIDTH", DEFAULT_WIDTH)
     height = _int_env("DISPLAY_HEIGHT", DEFAULT_HEIGHT)
@@ -260,6 +279,7 @@ def main() -> None:
         vnc = _start_vnc(width, height)
 
         env = _build_mcp_env(width, height)
+        _cleanup_chrome_locks(env.get("PLAYWRIGHT_MCP_USER_DATA_DIR"))
         mcp = subprocess.Popen(
             [
                 "node",

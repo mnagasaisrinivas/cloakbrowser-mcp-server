@@ -190,5 +190,40 @@ class McpEnvTests(unittest.TestCase):
                 tmp_path.chmod(0o700)
 
 
+class CleanupChromeLocksTests(unittest.TestCase):
+    def test_ignores_nonexistent_or_empty_dir(self) -> None:
+        # Should not raise any exception
+        launcher._cleanup_chrome_locks(None)
+        launcher._cleanup_chrome_locks("/nonexistent/path/xyz")
+
+    def test_removes_stale_lock_files(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Create mock lock files: a normal file and a symlink (even broken)
+            lock_file = tmp_path / "SingletonLock"
+            lock_file.symlink_to("nonexistent-target")
+
+            socket_file = tmp_path / "SingletonSocket"
+            socket_file.write_text("dummy-socket")
+
+            cookie_file = tmp_path / "SingletonCookie"
+            cookie_file.write_text("dummy-cookie")
+
+            # Check that files exist
+            self.assertTrue(lock_file.is_symlink())
+            self.assertTrue(socket_file.exists())
+            self.assertTrue(cookie_file.exists())
+
+            # Run cleanup
+            launcher._cleanup_chrome_locks(str(tmp_path))
+
+            # Verify they are deleted
+            self.assertFalse(lock_file.exists() or lock_file.is_symlink())
+            self.assertFalse(socket_file.exists())
+            self.assertFalse(cookie_file.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
