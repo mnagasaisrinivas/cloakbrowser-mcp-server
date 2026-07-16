@@ -126,5 +126,69 @@ class WaitForTcpTests(unittest.TestCase):
         self.assertFalse(launcher._wait_for_tcp("127.0.0.1", 1, 0.5, "test"))
 
 
+class McpEnvTests(unittest.TestCase):
+    def test_headless_is_always_false(self) -> None:
+        env = launcher._build_mcp_env(1024, 768, base_env={})
+        self.assertEqual(env["PLAYWRIGHT_MCP_HEADLESS"], "false")
+
+    def test_default_viewport_context_options(self) -> None:
+        env = launcher._build_mcp_env(1280, 800, base_env={})
+        self.assertEqual(
+            env["CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS"],
+            '{"viewport":{"width":1280,"height":800}}',
+        )
+
+    def test_honors_existing_context_options(self) -> None:
+        custom_opts = '{"viewport":{"width":100,"height":100},"locale":"fr-FR"}'
+        env = launcher._build_mcp_env(
+            1280,
+            800,
+            base_env={"CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS": custom_opts},
+        )
+        self.assertEqual(env["CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS"], custom_opts)
+
+    def test_preserves_existing_user_data_dir(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            env = launcher._build_mcp_env(
+                1024,
+                768,
+                base_env={"PLAYWRIGHT_MCP_USER_DATA_DIR": "/custom/path"},
+                data_dir_path=tmp_path,
+            )
+            self.assertEqual(env["PLAYWRIGHT_MCP_USER_DATA_DIR"], "/custom/path")
+
+    def test_defaults_to_data_dir_when_exists_and_writable(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            env = launcher._build_mcp_env(1024, 768, base_env={}, data_dir_path=tmp_path)
+            self.assertEqual(env.get("PLAYWRIGHT_MCP_USER_DATA_DIR"), str(tmp_path))
+
+    def test_does_not_default_when_data_dir_missing(self) -> None:
+        tmp_path = Path("/nonexistent/data/dir")
+        env = launcher._build_mcp_env(1024, 768, base_env={}, data_dir_path=tmp_path)
+        self.assertNotIn("PLAYWRIGHT_MCP_USER_DATA_DIR", env)
+
+    def test_does_not_default_when_data_dir_not_writable(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tmp_path.chmod(0o400)
+            try:
+                env = launcher._build_mcp_env(1024, 768, base_env={}, data_dir_path=tmp_path)
+                is_writable = os.access(tmp_path, os.W_OK)
+                if not is_writable:
+                    self.assertNotIn("PLAYWRIGHT_MCP_USER_DATA_DIR", env)
+                else:
+                    self.assertEqual(env.get("PLAYWRIGHT_MCP_USER_DATA_DIR"), str(tmp_path))
+            finally:
+                tmp_path.chmod(0o700)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

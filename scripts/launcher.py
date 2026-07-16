@@ -204,6 +204,40 @@ def _start_vnc(width: int, height: int) -> subprocess.Popen | None:
     return proc
 
 
+def _build_mcp_env(
+    width: int,
+    height: int,
+    base_env: dict[str, str] | None = None,
+    data_dir_path: Path = Path("/data"),
+) -> dict[str, str]:
+    """Build the environment variables for the cloakbrowser-mcp process."""
+    env = dict(base_env) if base_env is not None else os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+    # Upstream defaults to headless; this wrapper's whole purpose is
+    # the visible browser, so force it on regardless of caller env.
+    env["PLAYWRIGHT_MCP_HEADLESS"] = "false"
+    # If the operator hasn't set context options, default the viewport
+    # to the Xvfb screen so the Chromium window fills the VNC display
+    # without a black strip. Operator-supplied CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS
+    # is honoured untouched.
+    if "CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS" not in env:
+        env["CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS"] = (
+            f'{{"viewport":{{"width":{width},"height":{height}}}}}'
+        )
+    # Enable persistent user data by defaulting to /data if it exists and is writable.
+    if "PLAYWRIGHT_MCP_USER_DATA_DIR" not in env and data_dir_path.is_dir():
+        if os.access(data_dir_path, os.W_OK):
+            env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = str(data_dir_path)
+            log.info("defaulting PLAYWRIGHT_MCP_USER_DATA_DIR to %s", data_dir_path)
+        else:
+            log.warning(
+                "directory %s exists but is not writable by the current user; "
+                "not enabling persistent profile by default",
+                data_dir_path,
+            )
+    return env
+
+
 def main() -> None:
     width = _int_env("DISPLAY_WIDTH", DEFAULT_WIDTH)
     height = _int_env("DISPLAY_HEIGHT", DEFAULT_HEIGHT)
@@ -225,20 +259,7 @@ def main() -> None:
         xvfb, wm = _start_x_stack(width, height)
         vnc = _start_vnc(width, height)
 
-        env = os.environ.copy()
-        env["DISPLAY"] = DISPLAY
-        # Upstream defaults to headless; this wrapper's whole purpose is
-        # the visible browser, so force it on regardless of caller env.
-        env["PLAYWRIGHT_MCP_HEADLESS"] = "false"
-        # If the operator hasn't set context options, default the viewport
-        # to the Xvfb screen so the Chromium window fills the VNC display
-        # without a black strip. Operator-supplied CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS
-        # is honoured untouched.
-        if "CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS" not in env:
-            env["CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS"] = (
-                f'{{"viewport":{{"width":{width},"height":{height}}}}}'
-            )
-
+        env = _build_mcp_env(width, height)
         mcp = subprocess.Popen(
             [
                 "node",
