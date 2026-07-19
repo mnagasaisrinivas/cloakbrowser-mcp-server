@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import signal
 import socket
 import subprocess
 import sys
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
+from shutil import which
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,8 +52,6 @@ CLOAK_MCP_BIN = "/opt/cloakbrowser-mcp/dist/cli.js"
 
 
 def _have(cmd: str) -> bool:
-    from shutil import which
-
     return which(cmd) is not None
 
 
@@ -225,8 +223,14 @@ def _build_mcp_env(
         env["CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS"] = (
             f'{{"viewport":{{"width":{width},"height":{height}}}}}'
         )
-    # Enable persistent user data by defaulting to /data if it exists and is writable.
-    if "PLAYWRIGHT_MCP_USER_DATA_DIR" not in env and data_dir_path.is_dir():
+    # NO_PERSISTENT_PROFILE=1 strips the user-data-dir: upstream's BrowserContext
+    # singleton never claims /data and never writes its lockfile, so container
+    # restarts can no longer wedge on stale lockfiles. Trades persistence for resilience.
+    if os.environ.get("NO_PERSISTENT_PROFILE", "").lower() in {"1", "true", "yes"}:
+        env.pop("PLAYWRIGHT_MCP_USER_DATA_DIR", None)
+        log.info("NO_PERSISTENT_PROFILE set; transient BrowserContext, no saved logins")
+    # Otherwise enable persistent user data by defaulting to /data if it exists and is writable.
+    elif "PLAYWRIGHT_MCP_USER_DATA_DIR" not in env and data_dir_path.is_dir():
         if os.access(data_dir_path, os.W_OK):
             env["PLAYWRIGHT_MCP_USER_DATA_DIR"] = str(data_dir_path)
             log.info("defaulting PLAYWRIGHT_MCP_USER_DATA_DIR to %s", data_dir_path)
@@ -240,89 +244,48 @@ def _build_mcp_env(
 
 
 def _cleanup_chrome_locks(user_data_dir_str: str | None) -> None:
-    """Remove stale lock files in ``user_data_dir`` left behind by an
-    unclean shutdown.
-
-    Two flavours exist:
-
-    * Classic Chromium single-instance: ``SingletonLock``,
-      ``SingletonSocket``, ``SingletonCookie``.
-    * Upstream cloakbrowser-mcp's own process guard:
-      ``.cloakbrowser-mcp-profile.lock`` (a small JSON file recording
-      the owning pid + start time). When /data is bind-mounted across
-      container restarts this file persists, and the fresh Chromium
-      refuses to launch because its pid doesn't match the recorded one.
-    """
+    """Remove stale lock files: Chromium Singleton{Lock,Socket,Cookie} and
+    upstream's .cloakbrowser-mcp-profile.lock (JSON pid-guard that survives
+    bind-mounts across container restarts)."""
     if not user_data_dir_str:
         return
     user_data_dir = Path(user_data_dir_str)
     if not user_data_dir.is_dir():
         return
 
-    lock_files = [
+    for lock_name in (
         "SingletonLock",
         "SingletonSocket",
         "SingletonCookie",
         ".cloakbrowser-mcp-profile.lock",
-    ]
-    for lock_name in lock_files:
+    ):
         p = user_data_dir / lock_name
-        if p.exists() or p.is_symlink():
-            try:
-                p.unlink(missing_ok=True)
-                log.info("Removed stale Chrome lock: %s", p)
-            except Exception as e:
-                log.warning("Failed to remove stale Chrome lock %s: %s", p, e)
+        if not (p.exists() or p.is_symlink()):
+            continue
+        try:
+            p.unlink(missing_ok=True)
+            log.info("Removed stale Chrome lock: %s", p)
+        except OSError as e:
+            log.warning("Failed to remove stale Chrome lock %s: %s", p, e)
 
 
 def _kill_stale_chromium(proc_root: Path = Path("/proc")) -> None:
-    """SIGKILL any leftover Chromium processes visible under ``proc_root``.
-
-    When the wrapper (or its parent container) dies uncleanly, a child
-    Chromium can survive long enough to hold the SingletonLock on
-    PLAYWRIGHT_MCP_USER_DATA_DIR, blocking the next launch with
-    'User data directory is already active'. We scan numeric entries
-    under ``proc_root`` whose ``comm`` matches ``chrom(e|ium)`` and
-    SIGKILL them, so a fresh container starts from a clean slate.
-
-    The default ``proc_root`` is the system ``/proc``. ``main()``
-    uses the default; tests inject a temp directory. We only read
-    ``comm`` files, so the function is harmless on hosts that don't
-    expose that layout.
-    """
+    """SIGKILL any leftover Chromium in our PID namespace. Killed upstream
+    Chromium holds the user-data-dir SingletonLock until the kernel releases
+    the inode. ``proc_root`` is injectable so tests run on non-Linux."""
+    # ponytail: pgrep + os.system would be one line; this exists for testability.
     if not proc_root.is_dir():
         return
-
-    import signal as _signal  # local import keeps top-level imports tight
-
-    pattern = re.compile(r"^chrom(e|ium)\b", re.IGNORECASE)
-    pids: list[int] = []
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
+    for pid in proc_root.iterdir():
+        if not pid.name.isdigit():
             continue
         try:
-            comm = (entry / "comm").read_text().strip()
-        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            comm = (pid / "comm").read_text().strip().lower()
+        except OSError:
             continue
-        if pattern.match(comm):
-            pids.append(int(entry.name))
-
-    if not pids:
-        return
-
-    for pid in pids:
-        try:
-            os.kill(pid, _signal.SIGKILL)
-            log.warning("killed stale Chromium process pid=%d", pid)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            log.warning(
-                "pid=%d is outside our PID namespace; cannot kill",
-                pid,
-            )
-        except OSError as e:
-            log.warning("failed to kill stale Chromium pid=%d: %s", pid, e)
+        if comm.startswith("chrom"):
+            os.kill(int(pid.name), signal.SIGKILL)
+            log.warning("killed stale Chromium pid=%s", pid.name)
 
 
 def main() -> None:
@@ -391,3 +354,18 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+@contextmanager
+def _patch_no_persistent_profile(value):
+    """Test helper: temporarily set or clear NO_PERSISTENT_PROFILE."""
+    key = "NO_PERSISTENT_PROFILE"
+    old = os.environ.get(key)
+    (os.environ.pop if value is None else os.environ.__setitem__)(key, value)
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old

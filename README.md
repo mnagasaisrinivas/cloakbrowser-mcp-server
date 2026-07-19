@@ -61,8 +61,7 @@ Then:
 | `VNC_PASSWORD`   | unset   | If set, VNC requires this plaintext password. If unset, VNC is unauthenticated (`x11vnc -nopw`). |
 | `DISPLAY_WIDTH` | `1024` | Xvfb screen width. Also passed to Playwright as the page viewport (unless the operator sets `CLOAK_PLAYWRIGHT_MCP_CONTEXT_OPTIONS`). |
 | `DISPLAY_HEIGHT` | `768` | Xvfb screen height. Also passed to Playwright as the page viewport. |
-
-### Pass-through
+| `NO_PERSISTENT_PROFILE` | `unset` | If `1`/`true`/`yes`/`on`, the wrapper strips `PLAYWRIGHT_MCP_USER_DATA_DIR` from upstream's env. Use this to skip persistent profile and avoid the upstream Chromium singleton lockfile (`/data/.cloakbrowser-mcp-profile.lock`) that wedges container restarts when the Node process recycles mid-session. Trades persistence for resilience. |
 
 Any `PLAYWRIGHT_MCP_*` and `CLOAK_PLAYWRIGHT_MCP_*` variable is forwarded to the upstream `cloakbrowser-mcp` CLI untouched. See [Configuration](https://swimmwatch.github.io/cloakbrowser-mcp/configuration/) in the upstream docs for the full list. The wrapper only overrides:
 
