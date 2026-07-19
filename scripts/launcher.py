@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -257,6 +258,56 @@ def _cleanup_chrome_locks(user_data_dir_str: str | None) -> None:
                 log.warning("Failed to remove stale Chrome lock %s: %s", p, e)
 
 
+def _kill_stale_chromium(proc_root: Path = Path("/proc")) -> None:
+    """SIGKILL any leftover Chromium processes visible under ``proc_root``.
+
+    When the wrapper (or its parent container) dies uncleanly, a child
+    Chromium can survive long enough to hold the SingletonLock on
+    PLAYWRIGHT_MCP_USER_DATA_DIR, blocking the next launch with
+    'User data directory is already active'. We scan numeric entries
+    under ``proc_root`` whose ``comm`` matches ``chrom(e|ium)`` and
+    SIGKILL them, so a fresh container starts from a clean slate.
+
+    The default ``proc_root`` is the system ``/proc``. ``main()``
+    uses the default; tests inject a temp directory. We only read
+    ``comm`` files, so the function is harmless on hosts that don't
+    expose that layout.
+    """
+    if not proc_root.is_dir():
+        return
+
+    import signal as _signal  # local import keeps top-level imports tight
+
+    pattern = re.compile(r"^chrom(e|ium)\b", re.IGNORECASE)
+    pids: list[int] = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            comm = (entry / "comm").read_text().strip()
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue
+        if pattern.match(comm):
+            pids.append(int(entry.name))
+
+    if not pids:
+        return
+
+    for pid in pids:
+        try:
+            os.kill(pid, _signal.SIGKILL)
+            log.warning("killed stale Chromium process pid=%d", pid)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            log.warning(
+                "pid=%d is outside our PID namespace; cannot kill",
+                pid,
+            )
+        except OSError as e:
+            log.warning("failed to kill stale Chromium pid=%d: %s", pid, e)
+
+
 def main() -> None:
     width = _int_env("DISPLAY_WIDTH", DEFAULT_WIDTH)
     height = _int_env("DISPLAY_HEIGHT", DEFAULT_HEIGHT)
@@ -275,11 +326,18 @@ def main() -> None:
 
     xvfb = wm = vnc = mcp = None
     try:
+        # Kill any leftover Chromium from an earlier unclean container
+        # death before we touch the SingletonLock files. Order matters:
+        # kill first (so the lock files get released by the kernel),
+        # then clean any that survived anyway.
+        _kill_stale_chromium()
+
         xvfb, wm = _start_x_stack(width, height)
         vnc = _start_vnc(width, height)
 
         env = _build_mcp_env(width, height)
         _cleanup_chrome_locks(env.get("PLAYWRIGHT_MCP_USER_DATA_DIR"))
+
         mcp = subprocess.Popen(
             [
                 "node",

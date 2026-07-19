@@ -225,5 +225,61 @@ class CleanupChromeLocksTests(unittest.TestCase):
             self.assertFalse(cookie_file.exists())
 
 
+class KillStaleChromiumTests(unittest.TestCase):
+    """_kill_stale_chromium() scans ``proc_root`` (defaults to /proc) for
+    ``comm`` files matching ``chrom(e|ium)`` and SIGKILLs those pids.
+    Stubbed via the proc_root parameter so it runs on any platform."""
+
+    def _write_comm(self, proc_root: Path, pid: int, comm: str) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "comm").write_text(comm + "\n")
+
+    def test_missing_proc_root_is_noop(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nonexistent = Path(tmpdir) / "no-such-dir"
+            launcher._kill_stale_chromium(nonexistent)  # must not raise
+
+    def test_kills_matching_pids_and_skips_unrelated(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proc_root = Path(tmpdir)
+            self._write_comm(proc_root, 1001, "chromium-browser")
+            self._write_comm(proc_root, 1002, "chrome")
+            self._write_comm(proc_root, 1003, "chromium-headless-shell")
+            self._write_comm(proc_root, 1004, "node")
+            self._write_comm(proc_root, 1005, "python3")
+            (proc_root / "self").write_text("not-a-pid-dir")  # non-numeric
+
+            killed: list[tuple[int, int]] = []
+
+            with patch("os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                launcher._kill_stale_chromium(proc_root)
+
+            killed_pids = sorted(pid for pid, _ in killed)
+            self.assertEqual(killed_pids, [1001, 1002, 1003])
+            # Every kill was SIGKILL (signal 9).
+            self.assertTrue(all(sig == 9 for _, sig in killed))
+
+    def test_no_matches_means_no_kill(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            proc_root = Path(tmpdir)
+            self._write_comm(proc_root, 1001, "node")
+            self._write_comm(proc_root, 1002, "python3")
+
+            calls: list[tuple[int, int]] = []
+            with patch("os.kill", side_effect=lambda pid, sig: calls.append((pid, sig))):
+                launcher._kill_stale_chromium(proc_root)
+
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -42,6 +42,7 @@ Then:
 
 `scripts/launcher.py` orchestrates the whole thing in one process:
 
+0. SIGKILL any leftover Chromium from an earlier unclean container death — otherwise it keeps holding the SingletonLock on `/data` and the next run starts with the upstream `User data directory is already active in this process` error. Then remove any stale `SingletonLock`/`SingletonSocket`/`SingletonCookie` files just in case.
 1. `Xvfb :99` at `$DISPLAY_WIDTH x $DISPLAY_HEIGHT`
 2. `openbox` (window manager so Chromium honours `--start-maximized`)
 3. `x11vnc` on `:5900`, password from `$VNC_PASSWORD` or open
