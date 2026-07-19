@@ -211,10 +211,17 @@ class CleanupChromeLocksTests(unittest.TestCase):
             cookie_file = tmp_path / "SingletonCookie"
             cookie_file.write_text("dummy-cookie")
 
+            # Upstream cloakbrowser-mcp profile lock — JSON guard
+            profile_lock = tmp_path / ".cloakbrowser-mcp-profile.lock"
+            profile_lock.write_text(
+                '{"pid": 31, "createdAt": "x", "userDataDir": "/data"}',
+            )
+
             # Check that files exist
             self.assertTrue(lock_file.is_symlink())
             self.assertTrue(socket_file.exists())
             self.assertTrue(cookie_file.exists())
+            self.assertTrue(profile_lock.exists())
 
             # Run cleanup
             launcher._cleanup_chrome_locks(str(tmp_path))
@@ -223,6 +230,7 @@ class CleanupChromeLocksTests(unittest.TestCase):
             self.assertFalse(lock_file.exists() or lock_file.is_symlink())
             self.assertFalse(socket_file.exists())
             self.assertFalse(cookie_file.exists())
+            self.assertFalse(profile_lock.exists())
 
 
 class KillStaleChromiumTests(unittest.TestCase):

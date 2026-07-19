@@ -240,14 +240,31 @@ def _build_mcp_env(
 
 
 def _cleanup_chrome_locks(user_data_dir_str: str | None) -> None:
-    """Remove stale Chrome Singleton locks to prevent launch failures after unclean shutdown."""
+    """Remove stale lock files in ``user_data_dir`` left behind by an
+    unclean shutdown.
+
+    Two flavours exist:
+
+    * Classic Chromium single-instance: ``SingletonLock``,
+      ``SingletonSocket``, ``SingletonCookie``.
+    * Upstream cloakbrowser-mcp's own process guard:
+      ``.cloakbrowser-mcp-profile.lock`` (a small JSON file recording
+      the owning pid + start time). When /data is bind-mounted across
+      container restarts this file persists, and the fresh Chromium
+      refuses to launch because its pid doesn't match the recorded one.
+    """
     if not user_data_dir_str:
         return
     user_data_dir = Path(user_data_dir_str)
     if not user_data_dir.is_dir():
         return
 
-    lock_files = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
+    lock_files = [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        ".cloakbrowser-mcp-profile.lock",
+    ]
     for lock_name in lock_files:
         p = user_data_dir / lock_name
         if p.exists() or p.is_symlink():
